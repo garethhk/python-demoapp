@@ -1,9 +1,9 @@
 pipeline {
-  agent none
+  agent { label 'build-cli' }   // << run most stages in ONE container/workspace
   options {
     timestamps()
     ansiColor('xterm')
-    skipDefaultCheckout(true)
+    skipDefaultCheckout(true)   // we call 'checkout scm' explicitly
   }
   environment {
     DOCKER_BUILDKIT = '1'
@@ -11,7 +11,6 @@ pipeline {
 
   stages {
     stage('Checkout') {
-      agent { label 'build-cli' }          // make sure this label exists
       steps {
         checkout scm
         sh 'git rev-parse --short HEAD > .git/shortsha || true'
@@ -19,7 +18,6 @@ pipeline {
     }
 
     stage('Compute Version') {
-      agent { label 'build-cli' }
       steps {
         script {
           def shortSha = sh(script: "git rev-parse --short HEAD", returnStdout: true).trim()
@@ -31,7 +29,6 @@ pipeline {
     }
 
     stage('Detect stack') {
-      agent { label 'build-cli' }
       steps {
         sh '''
           echo "Node:   $(node --version 2>/dev/null || echo 'missing')"
@@ -43,7 +40,6 @@ pipeline {
     }
 
     stage('Python: install & test') {
-      agent { label 'build-cli' }
       when { expression { fileExists('requirements.txt') } }
       steps {
         sh '''
@@ -62,7 +58,6 @@ pipeline {
     }
 
     stage('Node: install & test') {
-      agent { label 'build-cli' }
       when { expression { fileExists('package.json') } }
       steps {
         sh '''
@@ -77,8 +72,8 @@ pipeline {
     }
 
     stage('GPU sanity (optional)') {
-      agent { label 'gpu' }                // your GPU agent label
-      when { expression { false } }        // set to true when ready
+      agent { label 'gpu' }   // only this stage uses the GPU agent
+      when { expression { false } } // flip to true when you want to test GPU
       steps {
         sh '''
           nvidia-smi || true
@@ -95,7 +90,6 @@ PY
     }
 
     stage('Build container image') {
-      agent { label 'build-cli' }
       when { expression { fileExists('Dockerfile') } }
       steps {
         sh '''
@@ -106,10 +100,11 @@ PY
     }
 
     stage('Push image (optional)') {
-      agent { label 'build-cli' }
-      when { expression { false } }        // flip to true & set creds
+      when { expression { false } } // set true and configure your registry creds/URL
       steps {
-        withCredentials([usernamePassword(credentialsId: 'dockerhub-creds', usernameVariable: 'DOCKER_USER', passwordVariable: 'DOCKER_PASS')]) {
+        withCredentials([usernamePassword(credentialsId: 'dockerhub-creds',
+                                          usernameVariable: 'DOCKER_USER',
+                                          passwordVariable: 'DOCKER_PASS')]) {
           sh '''
             echo "$DOCKER_PASS" | docker login -u "$DOCKER_USER" --password-stdin
             docker tag myapp:${BUILD_VERSION} myorg/myapp:${BUILD_VERSION}
@@ -119,9 +114,7 @@ PY
       }
     }
 
-    // ✅ move cleanup here as a normal stage
     stage('Cleanup (local cache)') {
-      agent { label 'build-cli' }          // or whatever node has Docker
       steps {
         sh 'docker image prune -f || true'
       }
@@ -131,7 +124,6 @@ PY
   post {
     always {
       echo 'Pipeline finished.'
-      // (no stage/node blocks here)
     }
   }
 }
