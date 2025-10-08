@@ -3,17 +3,16 @@ pipeline {
   options {
     timestamps()
     ansiColor('xterm')
-    skipDefaultCheckout(true) // we’ll call 'checkout scm' explicitly once
+    skipDefaultCheckout(true)
   }
   environment {
     DOCKER_BUILDKIT = '1'
   }
+
   stages {
     stage('Checkout') {
-      agent { label 'build-cli' }        // <-- ensure this matches your Docker agent label
+      agent { label 'build-cli' }          // make sure this label exists
       steps {
-        // In multibranch you can either rely on implicit checkout
-        // or call it explicitly; both are fine.
         checkout scm
         sh 'git rev-parse --short HEAD > .git/shortsha || true'
       }
@@ -35,9 +34,9 @@ pipeline {
       agent { label 'build-cli' }
       steps {
         sh '''
-          echo "Node: $(node --version 2>/dev/null || echo 'missing')"
+          echo "Node:   $(node --version 2>/dev/null || echo 'missing')"
           echo "Python: $(python3 --version 2>/dev/null || echo 'missing')"
-          echo "Java: $(java -version 2>&1 | head -n1 || echo 'missing')"
+          echo "Java:   $(java -version 2>&1 | head -n1 || echo 'missing')"
           echo "Docker: $(docker --version 2>/dev/null || echo 'missing')"
         '''
       }
@@ -78,8 +77,8 @@ pipeline {
     }
 
     stage('GPU sanity (optional)') {
-      agent { label 'gpu' }   // <-- your GPU agent label
-      when { expression { return false } } // flip to true to try
+      agent { label 'gpu' }                // your GPU agent label
+      when { expression { false } }        // set to true when ready
       steps {
         sh '''
           nvidia-smi || true
@@ -108,7 +107,7 @@ PY
 
     stage('Push image (optional)') {
       agent { label 'build-cli' }
-      when { expression { return false } } // set true and configure registry creds/URL
+      when { expression { false } }        // flip to true & set creds
       steps {
         withCredentials([usernamePassword(credentialsId: 'dockerhub-creds', usernameVariable: 'DOCKER_USER', passwordVariable: 'DOCKER_PASS')]) {
           sh '''
@@ -119,15 +118,20 @@ PY
         }
       }
     }
+
+    // ✅ move cleanup here as a normal stage
+    stage('Cleanup (local cache)') {
+      agent { label 'build-cli' }          // or whatever node has Docker
+      steps {
+        sh 'docker image prune -f || true'
+      }
+    }
   }
 
   post {
     always {
-      stage('Cleanup (local cache)') {
-        node('docker') { // or 'build-cli'
-          sh 'docker image prune -f || true'
-        }
-      }
+      echo 'Pipeline finished.'
+      // (no stage/node blocks here)
     }
   }
 }
