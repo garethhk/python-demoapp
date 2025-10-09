@@ -33,34 +33,38 @@ pipeline {
       }
     }
 
-    stage('GPU Stage (nested container)') {
-      agent { label 'build-cli' }
-      when {
-        anyOf {
-          expression { return params.USE_GPU }
-          branch pattern: '.*gpu.*', comparator: 'REGEXP'
-          expression { return fileExists('gpu.requirements.txt') }
-        }
-      }
-      steps {
-        script {
-          docker.image('elm/jenkins-agent:gpu')
-                .inside('--gpus all --entrypoint= -v /var/run/docker.sock:/var/run/docker.sock') {
-            withEnv([
-              'NVIDIA_VISIBLE_DEVICES=all',
-              'NVIDIA_DRIVER_CAPABILITIES=compute,utility'
-            ]) {
-              sh '''
-                echo "Inside nested GPU container:"
-                whoami
-                java -version
-                nvidia-smi | head -n 10
-              '''
-            }
-          }
-        }
+stage('GPU Stage (nested container)') {
+  agent { label 'gpu' }
+  steps {
+    script {
+      // Ensure the GPU image exists
+      sh 'docker inspect -f . elm/jenkins-agent:gpu || (echo "GPU image missing!" && exit 1)'
+
+      // Run inside the GPU container
+      docker.image('elm/jenkins-agent:gpu').inside('--gpus all --entrypoint= -v /var/run/docker.sock:/var/run/docker.sock') {
+        sh '''
+          echo "Inside nested GPU container:"
+          whoami
+          java -version
+          nvidia-smi | head -n 10 || echo "No nvidia-smi found"
+          
+          echo "🔍 Checking CUDA availability in PyTorch..."
+          python3 - <<'PY'
+try:
+    import torch
+    print(f"Torch version: {torch.__version__}")
+    print(f"CUDA available: {torch.cuda.is_available()}")
+    if torch.cuda.is_available():
+        print(f"CUDA device name: {torch.cuda.get_device_name(0)}")
+except Exception as e:
+    print("Torch not installed or failed:", e)
+PY
+        '''
       }
     }
+  }
+}
+
 
     stage('Build Container Image (optional)') {
       agent { label 'build-cli' }
