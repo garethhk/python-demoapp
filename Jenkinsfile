@@ -37,25 +37,28 @@ stage('GPU Stage (nested container)') {
   agent { label 'gpu' }
   steps {
     script {
-      // Ensure the GPU image exists
+      // Verify image
       sh 'docker inspect -f . elm/jenkins-agent:gpu || (echo "GPU image missing!" && exit 1)'
 
-      // Run inside the GPU container
-      docker.image('elm/jenkins-agent:gpu').inside('--gpus all --entrypoint= -v /var/run/docker.sock:/var/run/docker.sock') {
+      // Run with proper mount and GPU access
+      docker.image('elm/jenkins-agent:gpu').inside(
+        '--gpus all --entrypoint= ' +
+        "-v /var/run/docker.sock:/var/run/docker.sock " +
+        "-v ${pwd()}:/home/jenkins/agent/workspace/Test3_master"
+      ) {
         sh '''
           echo "Inside nested GPU container:"
           whoami
           java -version
           nvidia-smi | head -n 10 || echo "No nvidia-smi found"
-          
-          echo "🔍 Checking CUDA availability in PyTorch..."
+          echo "Running CUDA/PyTorch test:"
           python3 - <<'PY'
 try:
     import torch
-    print(f"Torch version: {torch.__version__}")
-    print(f"CUDA available: {torch.cuda.is_available()}")
+    print("Torch:", torch.__version__)
+    print("CUDA available:", torch.cuda.is_available())
     if torch.cuda.is_available():
-        print(f"CUDA device name: {torch.cuda.get_device_name(0)}")
+        print("Device:", torch.cuda.get_device_name(0))
 except Exception as e:
     print("Torch not installed or failed:", e)
 PY
@@ -64,6 +67,7 @@ PY
     }
   }
 }
+
 
 
     stage('Build Container Image (optional)') {
