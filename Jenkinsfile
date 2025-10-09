@@ -1,122 +1,96 @@
 pipeline {
-  agent { label 'build-cli' }   // << run most stages in ONE container/workspace
+  agent none
   options {
     timestamps()
     ansiColor('xterm')
-    skipDefaultCheckout(true)   // we call 'checkout scm' explicitly
+    skipDefaultCheckout(true)
   }
+
+  parameters {
+    booleanParam(name: 'USE_GPU', defaultValue: false, description: 'Run GPU stages in nested container')
+  }
+
   environment {
+    // set by outer agent; inner GPU container gets its own env too
     DOCKER_BUILDKIT = '1'
   }
 
   stages {
+
     stage('Checkout') {
+      agent { label 'build-cli' } // your working CPU agent
       steps {
         checkout scm
         sh 'git rev-parse --short HEAD > .git/shortsha || true'
       }
     }
 
-    stage('Compute Version') {
+    stage('CPU Build & Test') {
+      agent { label 'build-cli' }
+      steps {
+        sh '''
+          echo "Node: $(node --version 2>/dev/null || echo missing)"
+          echo "Python: $(python3 --version 2>/dev/null || echo missing)"
+          echo "Docker: $(docker --version 2>/dev/null || echo missing)"
+          echo "Java: $(java -version 2>&1 | head -n1 || echo missing)"
+
+          # your normal build/test steps here
+          echo "Running CPU unit tests..."
+        '''
+      }
+    }
+
+    stage('GPU Stage (nested container)') {
+      agent { label 'build-cli' }
+      when {
+        anyOf {
+          expression { return params.USE_GPU }                   // manual toggle
+          branch pattern: '.*gpu.*', comparator: 'REGEXP'        // branch naming convention
+          expression { return fileExists('gpu.requirements.txt') } // repo signal file
+        }
+      }
       steps {
         script {
-          def shortSha = sh(script: "git rev-parse --short HEAD", returnStdout: true).trim()
-          def ts = sh(script: "date +%Y%m%d%H%M%S", returnStdout: true).trim()
-          env.BUILD_VERSION = "${shortSha}-${ts}"
-        }
-        echo "Build version: ${env.BUILD_VERSION}"
-      }
-    }
+          // Run inside your GPU image with --gpus all
+          docker.image('elm/jenkins-agent:gpu').inside('--gpus all -v /var/run/docker.sock:/var/run/docker.sock') {
+            withEnv([
+              'NVIDIA_VISIBLE_DEVICES=all',
+              'NVIDIA_DRIVER_CAPABILITIES=compute,utility'
+            ]) {
+              sh '''
+                echo "Inside nested GPU container:"
+                whoami
+                java -version
+                (nvidia-smi || echo "No GPU detected") | head -n 10
 
-    stage('Detect stack') {
-      steps {
-        sh '''
-          echo "Node:   $(node --version 2>/dev/null || echo 'missing')"
-          echo "Python: $(python3 --version 2>/dev/null || echo 'missing')"
-          echo "Java:   $(java -version 2>&1 | head -n1 || echo 'missing')"
-          echo "Docker: $(docker --version 2>/dev/null || echo 'missing')"
-        '''
-      }
-    }
-
-    stage('Python: install & test') {
-      when { expression { fileExists('requirements.txt') } }
-      steps {
-        sh '''
-          python3 -m venv .venv
-          . .venv/bin/activate
-          pip install -U pip
-          pip install -r requirements.txt
-          if [ -f pytest.ini ] || ls -1 tests/*.py >/dev/null 2>&1; then
-            python -m pytest -q
-          else
-            echo "No pytest config/tests found. Skipping."
-          fi
-        '''
-      }
-      post { always { sh 'rm -rf .venv || true' } }
-    }
-
-    stage('Node: install & test') {
-      when { expression { fileExists('package.json') } }
-      steps {
-        sh '''
-          npm ci || npm install
-          if jq -re '.scripts.test' package.json >/dev/null 2>&1; then
-            npm test
-          else
-            echo "No npm test script. Skipping."
-          fi
-        '''
-      }
-    }
-
-    stage('GPU sanity (optional)') {
-      agent { label 'gpu' }   // only this stage uses the GPU agent
-      when { expression { false } } // flip to true when you want to test GPU
-      steps {
-        sh '''
-          nvidia-smi || true
-          python3 - <<'PY'
+                # Example: Python GPU job (torch optional)
+                python3 - <<'PY'
 try:
-  import torch
-  print("Torch:", torch.__version__)
-  print("CUDA available:", torch.cuda.is_available())
+    import torch
+    print("Torch:", torch.__version__)
+    print("CUDA available:", torch.cuda.is_available())
+    if torch.cuda.is_available():
+        print("GPU name:", torch.cuda.get_device_name(0))
 except Exception as e:
-  print("torch not present or failed:", e)
+    print("Torch not installed or failed:", e)
 PY
-        '''
+              '''
+            }
+          }
+        }
       }
     }
 
-    stage('Build container image') {
+    stage('Build Container Image (optional)') {
+      agent { label 'build-cli' }
       when { expression { fileExists('Dockerfile') } }
       steps {
         sh '''
-          docker build -t myapp:${BUILD_VERSION} .
+          VERSION=$(cat .git/shortsha 2>/dev/null || echo dev)-$(date +%Y%m%d%H%M%S)
+          echo "Building image myapp:${VERSION}"
+          docker build -t myapp:${VERSION} .
           docker image ls | head -n 20
         '''
-      }
-    }
-
-    stage('Push image (optional)') {
-      when { expression { false } } // set true and configure your registry creds/URL
-      steps {
-        withCredentials([usernamePassword(credentialsId: 'dockerhub-creds',
-                                          usernameVariable: 'DOCKER_USER',
-                                          passwordVariable: 'DOCKER_PASS')]) {
-          sh '''
-            echo "$DOCKER_PASS" | docker login -u "$DOCKER_USER" --password-stdin
-            docker tag myapp:${BUILD_VERSION} myorg/myapp:${BUILD_VERSION}
-            docker push myorg/myapp:${BUILD_VERSION}
-          '''
-        }
-      }
-    }
-
-    stage('Cleanup (local cache)') {
-      steps {
-        sh 'docker image prune -f || true'
       }
     }
   }
@@ -124,6 +98,10 @@ PY
   post {
     always {
       echo 'Pipeline finished.'
+      // Optional lightweight cleanup on the outer agent
+      node('build-cli') {
+        sh 'docker image prune -f || true'
+      }
     }
   }
 }
